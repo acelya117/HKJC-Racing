@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AquaCare</title>
+  <!-- Placeholder: replace this folder's contents with the frontend (Part 3).
+       Frontend code can call the API with relative URLs, e.g. fetch('/api/tanks?user_id=1'). -->
+  <style>body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.5}</style>
+</head>
+<body>
+  <h1>AquaCare backend is running</h1>
+  <p id="db">Checking database…</p>
+  <ul>
+    <li><a href="/api/health">/api/health</a></li>
+    <li><a href="/api/users">/api/users</a></li>
+    <li><a href="/api/tanks?user_id=1">/api/tanks?user_id=1</a></li>
+    <li><a href="/api/tasks/due?user_id=1">/api/tasks/due?user_id=1</a></li>
+    <li><a href="/api/history?tank_id=1">/api/history?tank_id=1</a></li>
+  </ul>
+  <script>
+    fetch('/api/health').then(r => r.json())
+      .then(h => document.getElementById('db').textContent = 'Database: ' + h.database)
+      .catch(() => document.getElementById('db').textContent = 'Database: unreachable');
+  </script>
+</body>
+</html>
