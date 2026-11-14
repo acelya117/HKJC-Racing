@@ -1,6 +1,6 @@
 # Report draft: Nayeon's sections (3 Methodology, 6 Conclusion)
 
-Draft of 13 Nov 2026 for the final report (template sections 3 and 6). Every number comes from a
+Draft of 13 Nov 2026, shortened 14 Nov to about 1.5 pages per section, for the final report (template sections 3 and 6). Every number comes from a
 committed artifact: fold results from `artifacts/folds/` (commit `1042a3d`, all runs passing the
 run-gate), the baseline ladder from `artifacts/folds/primary/ladder.md`, selection frequencies
 from `artifacts/folds/ablation_feature_selection_frequency.csv`, blend weights from
@@ -12,192 +12,109 @@ the end. Renumber them when the sections are merged.
 
 ## 3 Methodology
 
-### 3.1 Overview
+### 3.1 Approach and baselines
 
-Our approach is a scaled-down version of Benter's two-stage method [1]. Stage 1 estimates each
-runner's win probability from public pre-race information only, without the odds. Stage 2
-combines these "fundamental" probabilities with the market's implied probabilities in a second
-conditional logit, so its fitted weights show what the models add beyond the odds. Every model
-outputs one probability per runner that sums to one within the race, and every model is scored
-on the same races by per-race log loss (Section 5).
+We follow a scaled-down version of Benter's two-stage method [1]. Stage 1 estimates each
+runner's win probability from public pre-race data only, without the odds. Stage 2 combines
+these fundamental probabilities with the market's in a second conditional logit, so its
+weights show what the models add beyond the odds. Every model gives probabilities that sum to
+one within a race and is scored by per-race log loss on the same races (Section 5). The
+baseline ladder is: uniform (1/n); a draw-only conditional logit; our original 4 Nov
+conditional logit (15 frozen features); the raw market, q_i = (1/o_i) / Σ_j (1/o_j) from final
+odds o; and the calibrated market, p_i ∝ q_i^β with β fitted on the Stage 2 period. The
+calibration can correct a favourite–longshot bias [5], so the calibrated market is the target
+of our primary comparison.
 
-Pipeline: raw runners → feature builder (registry v3.1) → Stage 1: conditional logit and
-LightGBM → Stage 2: blend with the market → per-fold scoring against the baseline ladder.
+### 3.2 Features
 
-### 3.2 Baselines
+Features use only earlier race days from the same source and are mostly relative to the race
+mean (Section 2.5). The conditional logit chooses from 32 candidates (six always included);
+LightGBM uses 38 (the same plus within-race ranks and field size). Track/distance form is a
+horse's win, top-three and finishing-percentile record at today's track (T), distance band (D)
+and track × band (TD), each shrunk toward the level above:
+r_level = (S_level + 5 · r_parent) / (n_level + 5), along TD → T → career → prior-day source
+rate (D → career), where n and S count earlier starts and outcomes. A horse without history at a
+level inherits its parent, so these features are never missing. We also added trajectory
+terms (form change, finishing slope, layoff, class change) and two interactions. Running-style
+features were excluded because positions are only known during the race.
 
-We compare against a ladder of baselines of increasing strength, all fitted and scored on the
-same chronological folds:
+### 3.3 Stage 1 models
 
-1. **Uniform:** p = 1/n for n starters.
-2. **Draw-only:** a conditional logit on three draw features.
-3. **Original conditional logit:** our 4 Nov model with its frozen 15-feature universe.
-4. **Raw market:** final win odds o_i converted to q_i = (1/o_i) / Σ_j (1/o_j).
-5. **Calibrated market:** p_i ∝ q_i^β, with β fitted by maximum likelihood on the Stage 2 period.
-   The exponent can correct a favourite–longshot bias, where bettors overbet longshots [5],
-   so it is a stricter benchmark than the raw market. It is the target of our primary comparison.
+**Conditional logit** [2], [3]: runner i in race r has utility u_ri = x_ri'b and
+p_ri = exp(u_ri) / Σ_{j∈r} exp(u_rj), fitted on race winners. Standardised features are
+penalised with an elastic net [6], λ(0.5‖b‖₁ + 0.5 b'Sb), where S is the within-race feature
+covariance, and optimised with L-BFGS-B [7]. Forward selection starts from six base features
+and adds the candidate that most lowers inner-tune log loss, skipping candidates with
+|Spearman ρ| > 0.9 to a selected feature, until the gain falls below 0.001; λ ∈ {0, 0.003, 0.01}
+is then tuned on the same period.
 
-Shin's and power normalisation are also implemented in our evaluation tools as sensitivity
-checks; the fold ladder uses the calibrated market above.
+**LightGBM** [4] tests non-linear effects and interactions. Instead of the binary classifier in
+our proposal, whose outputs had to be renormalised per race, it is trained directly on the
+per-race softmax likelihood through a custom objective, so training and evaluation share one
+loss. Monotone constraints follow each feature's expected sign. Parameters were fixed in
+advance (learning rate 0.02, 15 leaves, 200 rows per leaf, 0.8 bagging, 0.7 feature sampling,
+L2 = 10); the tree count comes from early stopping on inner-tune log loss, and two seeds are
+averaged inside folds.
 
-### 3.3 Feature design
+### 3.4 Stage 2 blend
 
-All features use only earlier race days from the same source and are mostly expressed relative
-to the race mean (Section 2.5). The model inputs come from a versioned registry: 32 candidates
-for the conditional logit (six always included) and 38 for LightGBM (the same features plus
-within-race ranks and field size). Two design choices matter for the method.
+s_ri = β log q_ri + α_CL log p_ri^CL + α_GBM log p_ri^GBM, normalised by a softmax within the
+race. α ≈ 0 means a model adds nothing beyond the odds [1]. The weights are fitted on the Stage 2
+period with a ridge penalty toward the market-only solution (β = 1, α = 0), its strength chosen
+by month-by-month forward validation. The pre-registered primary model is market + both
+models; market + CL and market + LightGBM are also reported.
 
-**Hierarchical shrinkage for track/distance form.** For a horse's win rate, top-three rate and
-mean finishing percentile at today's track (T), distance band (D: ≤ 1200 m, ≤ 1650 m, ≤ 2000 m,
-longer) and track × band (TD), each level is shrunk toward the level above:
+### 3.5 Folds, ablations and alternatives
 
-  r_level = (S_level + k · r_parent) / (n_level + k),  k = 5,
+**Table M1.** Chronological folds (inner tune = last four months of S1).
 
-where n_level and S_level are the horse's earlier-day starts and outcomes at that level. The
-chain is TD → T → career → prior-day source rate, and D → career. A horse with no history at a
-level inherits its parent, so these nine features have no missing values.
+| Fold | S1: Stage 1 fit | S2: blend fit | Validation (races) |
+|---|---|---|---|
+| k1 | Sep 2017 – Jan 2019 | Feb – Jul 2019 | Sep 2019 – Jan 2020 (379) |
+| k2 | Sep 2017 – Jul 2019 | Sep 2019 – Jan 2020 | Feb – Jun 2020 (377) |
+| h1 | Sep 2017 – Oct 2025, Kaggle + HKJC | Nov 2025 – Jan 2026 | Feb – Mar 2026 (171) |
 
-**Trajectory and interaction terms.** Last finish minus the three-run average, the three-run
-finishing slope, layoff buckets, class-change direction, recent form × class change, and
-jockey/trainer strength × field size were added as hypothesis-led terms. Running-style features
-from in-race positions were built in Week 3 but excluded, because positions are only known
-during the race.
-
-### 3.4 Stage 1a: conditional logit
-
-Following McFadden [2] and its use in handicapping [3], [1], runner i in race r has utility
-u_ri = x_ri'b and
-
-  p_ri = exp(u_ri) / Σ_{j ∈ r} exp(u_rj).
-
-The likelihood uses each race's winner (dead heats share the target). Features are standardised
-with training-period means and standard deviations, and missing values are set to 0, the
-training mean. The coefficients minimise the mean negative log-likelihood plus an elastic-net
-penalty [6], λ(0.5‖b‖₁ + 0.5 b'Sb), where S is the pooled within-race covariance of the
-features, so the penalty acts on utility differences between runners. We optimise with
-L-BFGS-B [7].
-
-Features are selected by greedy forward selection. It starts from six base features (jockey win
-rate, three-run form, draw, draw × Happy Valley, carried weight, days since last run). Each step
-adds the candidate that most reduces log loss on the inner-tune period, skips candidates with
-|Spearman ρ| > 0.9 against a selected feature, and stops when the best gain is below 0.001. λ is
-then chosen from {0, 0.003, 0.01} on the same inner-tune period, and the model is refitted on
-the whole Stage 1 period.
-
-### 3.5 Stage 1b: LightGBM
-
-LightGBM [4] tests whether non-linear effects and interactions, such as weight mattering more
-over long distances, add signal. Our proposal used a binary classifier whose per-runner
-probabilities were renormalised within each race afterwards. We instead train on the per-race
-softmax likelihood: the trees output a utility f(x_ri), and a custom objective supplies the
-gradient and Hessian of −log softmax_r(f) at the winner, so training and evaluation use the same
-loss. Extra inputs are within-race percentile ranks of five key rates and field size, and
-monotone constraints follow each feature's expected sign (for example, better recent form never
-lowers the utility).
-
-The parameters were fixed before the fold runs: learning rate 0.02, 15 leaves, at least 200 rows
-per leaf, 80 % row bagging, 70 % feature sampling, L2 penalty 10, and 63 bins. The number of trees
-is chosen by early stopping on inner-tune per-race log loss (at most 4,000), scaled to the size
-of the full Stage 1 period, and the model is refitted there. Inside folds, predictions average
-the utilities of two seeds; a five-seed bag was reserved for a frozen final model.
-
-### 3.6 Stage 2: blending with the market
-
-Stage 2 is a conditional logit on log probabilities:
-
-  s_ri = β log q_ri + α_CL log p_ri^CL + α_GBM log p_ri^GBM,  p_ri = exp(s_ri) / Σ_{j ∈ r} exp(s_rj).
-
-If the models carry no information beyond the odds, α ≈ 0 and β alone calibrates the market;
-α > 0 means the fundamental model adds signal [1]. The weights are fitted on the Stage 2 period
-with a ridge penalty that shrinks them toward the market-only solution (β = 1, α = 0). The
-penalty is chosen from {0, 0.003, 0.01, 0.03, 0.1} by forward validation inside Stage 2: each
-month is scored by a blend fitted on the earlier months. We fit three blends (market + CL,
-market + LightGBM, market + both). The pre-registered primary model is market + both.
-
-### 3.7 Chronological folds and ablations
-
-All fitting is chronological and separated by period (Table M1). In each fold, the Stage 1
-models are fitted on S1. Its last four months form the inner-tune period, which is used for
-feature selection, the CL penalty and LightGBM early stopping. The blend and the market
-calibration are fitted on S2, and every model is scored once on the validation period. Folds k1
-and k2 use Kaggle data; h1 fits Stage 1 on Kaggle plus early HKJC data and validates on HKJC.
-Races from 1 April 2026 (h_test) are excluded from every fold. The decision rules are in
-Section 4.1.
-
-**Table M1.** Chronological folds.
-
-| Fold | S1 (Stage 1 fit) | S2 (blend fit) | Validation | Validation races |
-|---|---|---|---|---|
-| k1 | Sep 2017 – Jan 2019 | Feb – Jul 2019 | Sep 2019 – Jan 2020 | 379 |
-| k2 | Sep 2017 – Jul 2019 | Sep 2019 – Jan 2020 | Feb – Jun 2020 | 377 |
-| h1 | Sep 2017 – Oct 2025 (Kaggle + HKJC) | Nov 2025 – Jan 2026 | Feb – Mar 2026 | 171 |
-
-To separate feature families (sub-question 1), the whole pipeline is run with four feature
-configurations: all features (primary), without trainer-rate features, without track/distance
-features, and without both.
-
-### 3.8 Alternatives and refinements
-
-**Table M2.** Main changes during development.
-
-| Change | Why we tried it | Outcome |
-|---|---|---|
-| Binary LightGBM → per-race softmax objective | A binary loss ignores that runners compete within a race; renormalising afterwards changes the probabilities the model was trained on | Kaggle tune log loss 2.1837 → 2.1768; adopted |
-| Single tuning split → forward chronological folds | A feature should help repeatedly, not on one split | Adopted for all evidence |
-| Market-offset LightGBM (start from the odds, learn adjustments) | A direct test for residual signal | +0.0013 over four Kaggle periods fell to about +0.00005 in a stricter rerun; kept only as a residual diagnostic |
-| v2 → v3.1 features (track/distance, trajectory, interactions, jockey–trainer partnership) | Our roadmap judged that new pre-race information was more promising than model complexity | Better stand-alone CL; no gain in the blends (Section 5.3) |
-| Running-style features; HKJC horse-profile fields | Positions are known only during the race; profile missingness encodes the future (Section 2.3) | Excluded |
-| HKJC-only experiment with ratings and running style | Planned for sub-question 1 | Not implemented; no claim made |
-
-### 3.9 Software
-
-Python 3.13 with NumPy [8], pandas [9], SciPy [7] and LightGBM 4.7 [4]. Exact versions are
-locked in `requirements-lock.txt` (Section 4.3).
+Each fold is scored once on its validation period; races from April 2026 (h_test) are never
+used (Section 4.1). For sub-question 1, the pipeline is rerun without trainer-rate features,
+without track/distance features, and without both. Three alternatives were tried and set
+aside: a binary LightGBM (replaced by the softmax objective, which lowered Kaggle tune log loss
+from 2.1837 to 2.1768), a single tuning split (replaced by the folds), and a LightGBM that
+learns adjustments to the odds, whose +0.0013 gain fell to about +0.00005 in a stricter rerun,
+so it is kept only as a diagnostic.
 
 ---
 
 ## 6 Conclusion
 
-Our question was whether a fundamental model built from public data can predict Hong Kong race
-winners better than the HKJC betting odds. On our data the answer is no: we found no detectable
-improvement over the calibrated market. On 927 validation races in three chronological folds,
-the pre-registered primary blend (market + conditional logit + LightGBM) failed its rule, with
-gains of −0.0004 in k1 and +0.0007 in k2 and every interval including zero. The best of 12
-configuration–blend candidates, chosen after seeing the results, gained +0.0014 pooled
-[−0.0007, +0.0036]. That is within what picking the best of 12 by chance produces
-(p = 0.17), and its retrospective score on the 400 held-out races was −0.0027 [−0.0102, +0.0051].
+Can a fundamental model built from public data predict Hong Kong race winners better than the
+HKJC odds? On our data, no: we found no detectable improvement over the calibrated market. On
+927 validation races, the pre-registered primary blend failed its rule (k1 −0.0004, k2 +0.0007,
+every interval including zero). The best of 12 candidates, chosen after seeing the results,
+gained +0.0014 [−0.0007, +0.0036], within what choosing the best of 12 by chance produces
+(p = 0.17), and scored −0.0027 [−0.0102, +0.0051] on the 400 held-out races.
 
 The strongest supported findings are:
 
-1. **The market dominates.** Moving from uniform probabilities to the market lowers pooled log
-   loss by 0.510 (2.499 → 1.989). Our best stand-alone fundamental model, LightGBM, gains 0.306
-   (2.193), about 60 % of that. Public pre-race data therefore carry real information, but
-   almost all of it is already in the odds: blending adds at most about 0.001.
-2. **Sub-question 1 (feature families).** The v3.1 features made the stand-alone conditional logit
-   slightly better than our original model (2.1945 vs 2.1977). Yet removing the track/distance
-   features improved the blend slightly in every fold, and removing trainer rates gave no
-   consistent change. Beyond the six base features, only the trainer rate and the three-run
-   finishing slope were selected in two of the three folds. The new features describe horses
-   better but add nothing the market lacks.
-3. **Sub-question 2 (LightGBM vs conditional logit).** LightGBM was marginally better on its own
-   (2.1931 vs 2.1945) but not as a complement to the market. Pooled gains over the calibrated
-   market were +0.0011 for market + CL, +0.0008 for market + LightGBM and +0.0010 for both, the
-   best blend differed by fold, and the model weights changed sign between folds. We found no
-   evidence that non-linearity captures extra residual signal.
-4. **The pipeline is trustworthy.** Leakage tests, source isolation, a run-gate and a
-   bit-identical rebuild make every number above reproducible from a clean commit.
+1. **The market dominates.** It lowers pooled log loss by 0.510 relative to uniform (2.499 →
+   1.989); our best stand-alone model, LightGBM, achieves 60 % of that (2.193). Public data carry
+   real information, but almost all of it is already priced: blending adds about 0.001.
+2. **Feature families (sub-question 1).** The v3.1 features improved the stand-alone
+   conditional logit (2.1945 vs 2.1977 for our original model), but removing the track/distance
+   features improved the blend slightly in every fold, and removing trainer rates changed
+   nothing consistently. They describe horses better without adding what the market lacks.
+3. **LightGBM vs conditional logit (sub-question 2).** LightGBM was marginally better alone
+   (2.1931 vs 2.1945) but not alongside the market (pooled gains +0.0008 vs +0.0011), and blend
+   weights changed sign between folds. Non-linearity captured no extra residual signal.
+4. **The result is reproducible.** Leakage tests, a run-gate and a bit-identical rebuild tie
+   every number to a clean commit.
 
-What we demonstrated is a leakage-safe, reproducible forecasting pipeline and an upper bound:
-with 927 races, the 95 % intervals rule out improvements over the calibrated market larger than
-about 0.003–0.004 log loss on these folds. We did not demonstrate an edge, and we did not evaluate betting, so nothing
-here supports profitable wagering after the HKJC takeout.
-
-The most useful next step is a prospective test: score the frozen configuration once on races
-run after the freeze date, which our scoring gate already enforces. More continuous HKJC data,
-covering the 2020–2025 gap, would narrow the intervals. Beyond that, and as speculation rather
-than a result, information that public results do not contain, such as sectional times,
-time-stamped ratings or odds movements, seems more likely to add signal than further
-transformations of the same results.
+We demonstrated a leakage-safe, reproducible pipeline whose intervals rule out improvements
+larger than about 0.003–0.004 log loss on these folds. We did not demonstrate an edge, and we
+did not evaluate betting, so nothing here supports profitable wagering after the HKJC takeout.
+The most useful next step is a prospective test on races run after the freeze, which our
+scoring gate already enforces. More continuous HKJC data would narrow the intervals; as
+speculation, information absent from public results, such as sectional times or odds
+movements, seems more promising than further transformations of the same results.
 
 ---
 
@@ -233,8 +150,3 @@ misperceptions?," *Journal of Political Economy*, vol. 118, no. 4, pp. 723–746
 
 [7] P. Virtanen et al., "SciPy 1.0: Fundamental algorithms for scientific computing in Python,"
 *Nature Methods*, vol. 17, pp. 261–272, 2020.
-
-[8] C. R. Harris et al., "Array programming with NumPy," *Nature*, vol. 585, pp. 357–362, 2020.
-
-[9] W. McKinney, "Data structures for statistical computing in Python," in *Proc. 9th Python in
-Science Conf.*, 2010, pp. 56–61.
