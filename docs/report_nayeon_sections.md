@@ -1,6 +1,6 @@
 # Report draft: Nayeon's sections (3 Methodology, 6 Conclusion)
 
-Draft of 13 Nov 2026, shortened 14 Nov to about 1.5 pages per section, for the final report (template sections 3 and 6). Every number comes from a
+Draft of 13 Nov 2026, shortened 14 Nov; Methodology cut to under one page on 17 Nov (no repeats of Sections 2 and 4), for the final report (template sections 3 and 6). Every number comes from a
 committed artifact: fold results from `artifacts/folds/` (commit `1042a3d`, all runs passing the
 run-gate), the baseline ladder from `artifacts/folds/primary/ladder.md`, selection frequencies
 from `artifacts/folds/ablation_feature_selection_frequency.csv`, blend weights from
@@ -14,73 +14,21 @@ the end. Renumber them when the sections are merged.
 
 ### 3.1 Approach and baselines
 
-We follow a scaled-down version of Benter's two-stage method [1]. Stage 1 estimates each
-runner's win probability from public pre-race data only, without the odds. Stage 2 combines
-these fundamental probabilities with the market's in a second conditional logit, so its
-weights show what the models add beyond the odds. Every model gives probabilities that sum to
-one within a race and is scored by per-race log loss on the same races (Section 5). The
-baseline ladder is: uniform (1/n); a draw-only conditional logit; our original 4 Nov
-conditional logit (15 frozen features); the raw market, q_i = (1/o_i) / Σ_j (1/o_j) from final
-odds o; and the calibrated market, p_i ∝ q_i^β with β fitted on the Stage 2 period. The
-calibration can correct a favourite–longshot bias [5], so the calibrated market is the target
-of our primary comparison.
+We follow a scaled-down version of Benter's two-stage method [1]. Stage 1 estimates each runner's win probability from pre-race features only (Section 2.4), without the odds. Stage 2 blends these probabilities with the market's, so the blend weights show what the models add beyond the odds. Every model outputs probabilities that sum to one within a race. The baselines are uniform (1/n), a draw-only conditional logit, our original conditional logit (15 frozen features), the raw market q_i = (1/o_i) / Σ_j (1/o_j) from final odds o_i, and the calibrated market p_i ∝ q_i^β. The exponent β can correct the favourite–longshot bias [5], which makes the calibrated market the stricter target of our primary comparison.
 
-### 3.2 Features
+### 3.2 Stage 1 models
 
-Features use only earlier race days from the same source and are mostly relative to the race
-mean (Section 2.5). The conditional logit chooses from 32 candidates (six always included);
-LightGBM uses 38 (the same plus within-race ranks and field size). Track/distance form is a
-horse's win, top-three and finishing-percentile record at today's track (T), distance band (D)
-and track × band (TD), each shrunk toward the level above:
-r_level = (S_level + 5 · r_parent) / (n_level + 5), along TD → T → career → prior-day source
-rate (D → career), where n and S count earlier starts and outcomes. A horse without history at a
-level inherits its parent, so these features are never missing. We also added trajectory
-terms (form change, finishing slope, layoff, class change) and two interactions. Running-style
-features were excluded because positions are only known during the race.
+**Conditional logit** [2], [3]. Runner i in race r has utility u_ri = x_ri'b and p_ri = exp(u_ri) / Σ_{j∈r} exp(u_rj). Standardised features are fitted with an elastic net [6] using L-BFGS-B [7]. Forward selection starts from six base features and adds the candidate that most lowers inner-tune log loss, until the gain falls below 0.001.
 
-### 3.3 Stage 1 models
+**LightGBM** [4] tests non-linear effects and interactions. Unlike the binary classifier in our proposal, whose outputs had to be renormalised per race, it is trained directly on the per-race softmax likelihood, so training and evaluation use the same loss. Monotone constraints follow each feature's expected sign, and the number of trees is set by early stopping on inner-tune log loss.
 
-**Conditional logit** [2], [3]: runner i in race r has utility u_ri = x_ri'b and
-p_ri = exp(u_ri) / Σ_{j∈r} exp(u_rj), fitted on race winners. Standardised features are
-penalised with an elastic net [6], λ(0.5‖b‖₁ + 0.5 b'Sb), where S is the within-race feature
-covariance, and optimised with L-BFGS-B [7]. Forward selection starts from six base features
-and adds the candidate that most lowers inner-tune log loss, skipping candidates with
-|Spearman ρ| > 0.9 to a selected feature, until the gain falls below 0.001; λ ∈ {0, 0.003, 0.01}
-is then tuned on the same period.
+### 3.3 Stage 2 blend
 
-**LightGBM** [4] tests non-linear effects and interactions. Instead of the binary classifier in
-our proposal, whose outputs had to be renormalised per race, it is trained directly on the
-per-race softmax likelihood through a custom objective, so training and evaluation share one
-loss. Monotone constraints follow each feature's expected sign. Parameters were fixed in
-advance (learning rate 0.02, 15 leaves, 200 rows per leaf, 0.8 bagging, 0.7 feature sampling,
-L2 = 10); the tree count comes from early stopping on inner-tune log loss, and two seeds are
-averaged inside folds.
+s_ri = β log q_ri + α_CL log p_ri^CL + α_GBM log p_ri^GBM, normalised by a softmax within the race. A weight α ≈ 0 means that model adds nothing beyond the odds. A ridge penalty shrinks the weights toward the market-only solution (β = 1, α = 0). The pre-registered primary model blends the market with both models; the market + CL and market + LightGBM blends are also reported.
 
-### 3.4 Stage 2 blend
+### 3.4 Ablations and alternatives
 
-s_ri = β log q_ri + α_CL log p_ri^CL + α_GBM log p_ri^GBM, normalised by a softmax within the
-race. α ≈ 0 means a model adds nothing beyond the odds [1]. The weights are fitted on the Stage 2
-period with a ridge penalty toward the market-only solution (β = 1, α = 0), its strength chosen
-by month-by-month forward validation. The pre-registered primary model is market + both
-models; market + CL and market + LightGBM are also reported.
-
-### 3.5 Folds, ablations and alternatives
-
-**Table M1.** Chronological folds (inner tune = last four months of S1).
-
-| Fold | S1: Stage 1 fit | S2: blend fit | Validation (races) |
-|---|---|---|---|
-| k1 | Sep 2017 – Jan 2019 | Feb – Jul 2019 | Sep 2019 – Jan 2020 (379) |
-| k2 | Sep 2017 – Jul 2019 | Sep 2019 – Jan 2020 | Feb – Jun 2020 (377) |
-| h1 | Sep 2017 – Oct 2025, Kaggle + HKJC | Nov 2025 – Jan 2026 | Feb – Mar 2026 (171) |
-
-Each fold is scored once on its validation period; races from April 2026 (h_test) are never
-used (Section 4.1). For sub-question 1, the pipeline is rerun without trainer-rate features,
-without track/distance features, and without both. Three alternatives were tried and set
-aside: a binary LightGBM (replaced by the softmax objective, which lowered Kaggle tune log loss
-from 2.1837 to 2.1768), a single tuning split (replaced by the folds), and a LightGBM that
-learns adjustments to the odds, whose +0.0013 gain fell to about +0.00005 in a stricter rerun,
-so it is kept only as a diagnostic.
+To measure which feature families matter (sub-question 1), the whole pipeline is rerun without trainer-rate features, without track/distance features, and without both. Two earlier designs were set aside: a single tuning split, replaced by the chronological folds (Section 4.1), and a LightGBM that learns adjustments to the odds, whose gain fell from +0.0013 to about +0.00005 in a stricter rerun, so we keep it only as a diagnostic.
 
 ---
 
